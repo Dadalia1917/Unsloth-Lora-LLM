@@ -1,142 +1,251 @@
-import os
-from datasets import load_dataset
-from unsloth import FastLanguageModel
-from trl import SFTTrainer  # 用于监督微调的训练器
-from transformers import TrainingArguments  # 用于配置训练参数
-from unsloth import is_bfloat16_supported  # 检查是否支持bfloat16精度训练
-import wandb
+from __future__ import annotations
 
-# wandb.login(key="")  # 如果想启用wandb就取消注释，并将自己账号的key复制进去
+# 必须先设置 UTF-8 和 Unsloth 环境，再导入训练库。
+import common
 
-if __name__ == '__main__':
-    # 模型配置参数
-    max_seq_length = 2048  # 最大序列长度
-    dtype = None  # 数据类型，None表示自动选择
-    load_in_4bit = False  # 使用4bit量化加载模型以节省显存
+common.apply_runtime_env()
 
-    # 加载预训练模型和分词器
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="models/Qwen3-1.7B",
-        max_seq_length=max_seq_length,
-        dtype=dtype,
-        load_in_4bit=load_in_4bit,
+from unsloth import FastLanguageModel  # noqa: E402
+from trl import SFTConfig, SFTTrainer  # noqa: E402
+
+
+# 模型和数据
+MODEL_NAME = "models/Qwen3-1.7B"
+DATASET_SOURCE = "datasets/NetworkSecurity"
+DATASET_SPLIT = "train"
+DATASET_FILES = None
+MAX_SAMPLES = None
+
+MAX_SEQ_LENGTH = 2048
+LOAD_IN_4BIT = False
+LOAD_IN_8BIT = False
+ATTN_IMPLEMENTATION = "auto"
+DEVICE_MAP = "sequential"
+TRUST_REMOTE_CODE = False
+TEXT_ONLY = True
+
+SYSTEM_PROMPT = (
+    "你是一位在网络安全、网络攻防、信息保护和安全架构设计方面具有专业知识的网络安全专家。"
+    "请基于事实、分步骤地回答用户的网络安全问题。"
+)
+ENABLE_THINKING = False
+TRAIN_ON_RESPONSES_ONLY = True
+
+# LoRA
+LORA_R = 16
+LORA_ALPHA = 16
+LORA_DROPOUT = 0.0
+LORA_BIAS = "none"
+LORA_TARGET_MODULES = None  # None 表示按模型结构自动查找
+USE_RSLORA = False
+USE_GRADIENT_CHECKPOINTING = "unsloth"
+
+# MoE 默认只训练注意力和共享线性层
+TRAIN_MOE_EXPERTS = False
+MOE_EXPERT_LAYERS = None
+MOE_EXPERT_RANK = None
+
+# 训练参数
+OUTPUT_DIR = "outputs"
+PER_DEVICE_BATCH_SIZE = 2
+GRADIENT_ACCUMULATION_STEPS = 4
+WARMUP_STEPS = 5
+LEARNING_RATE = 2e-4
+LR_SCHEDULER_TYPE = "linear"
+WEIGHT_DECAY = 0.01
+MAX_STEPS = 60  # 设为 -1 时按 NUM_TRAIN_EPOCHS 训练
+NUM_TRAIN_EPOCHS = 1
+LOGGING_STEPS = 1
+SAVE_STEPS = 20
+OPTIMIZER = "adamw_8bit"
+REPORT_TO = "tensorboard"
+DATASET_NUM_PROC = 1
+PACKING = False
+RESUME_FROM_CHECKPOINT = False
+SEED = 3407
+
+# 保存
+SAVE_LORA_DIR = "Unsloth-Models"
+SAVE_MERGED_16BIT = False
+MERGED_DIR = "Unsloth-Models-merged"
+SAVE_GGUF = False
+GGUF_DIR = "Unsloth-Models-GGUF"
+GGUF_QUANTS = ["q4_k_m"]
+
+
+def check_config() -> None:
+    if min(MAX_SEQ_LENGTH, LORA_R, LORA_ALPHA, DATASET_NUM_PROC) <= 0:
+        raise ValueError("序列长度、LoRA 参数和数据处理进程数必须大于 0")
+    if not 0 <= LORA_DROPOUT < 1:
+        raise ValueError("LORA_DROPOUT 必须在 [0, 1) 范围内")
+    if MOE_EXPERT_RANK is not None and MOE_EXPERT_RANK <= 0:
+        raise ValueError("MOE_EXPERT_RANK 必须大于 0")
+
+
+def get_moe_options(model) -> dict:
+    if not common.is_moe_model(model):
+        return {}
+    if not TRAIN_MOE_EXPERTS:
+        print("检测到 MoE 模型，跳过专家参数")
+        return {}
+
+    target_parameters = common.auto_moe_target_parameters(model, MOE_EXPERT_LAYERS)
+    if not target_parameters:
+        print("没有找到融合专家参数，只训练普通线性层")
+        return {}
+
+    rank_pattern = common.moe_expert_rank_pattern(model, target_parameters, LORA_R)
+    if MOE_EXPERT_RANK is not None:
+        rank_pattern = {name: MOE_EXPERT_RANK for name in target_parameters}
+
+    options = {"target_parameters": target_parameters}
+    if rank_pattern:
+        options["rank_pattern"] = rank_pattern
+    print(f"训练 {len(target_parameters)} 个融合专家参数")
+    return options
+
+
+def main() -> None:
+    check_config()
+
+    capabilities = common.detect_capabilities()
+    common.print_capabilities(capabilities)
+    if not capabilities.gpu_name:
+        raise RuntimeError("没有检测到可用的 NVIDIA GPU")
+
+    profile = common.inspect_model_profile(MODEL_NAME, trust_remote_code=TRUST_REMOTE_CODE)
+    common.check_model_requirements(profile)
+    load_in_4bit, load_in_8bit = common.pick_quantization(
+        capabilities, LOAD_IN_4BIT, LOAD_IN_8BIT
     )
+    common.warn_model_runtime(profile, capabilities, load_in_4bit, load_in_8bit)
 
-    train_prompt_style = """以下是描述任务的指令，以及提供更多上下文的输入。
-                            请写出恰当完成该请求的回答。
-                            在回答之前，请仔细思考问题，并创建一个逐步的思维链，以确保回答合乎逻辑且准确。
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=MODEL_NAME,
+        max_seq_length=MAX_SEQ_LENGTH,
+        dtype=None,
+        load_in_4bit=load_in_4bit,
+        load_in_8bit=load_in_8bit,
+        load_in_16bit=not (load_in_4bit or load_in_8bit),
+        full_finetuning=False,
+        trust_remote_code=TRUST_REMOTE_CODE,
+        device_map=DEVICE_MAP,
+        text_only=TEXT_ONLY,
+        **common.resolve_attn_implementation(capabilities, ATTN_IMPLEMENTATION),
+    )
+    tokenizer = common.ensure_chat_template(tokenizer, model_profile=profile)
 
-                            ### Instruction:
-                            你是一位在网络安全、网络攻防、信息保护和安全架构设计方面具有专业知识的网络安全专家。
-                            请回答以下网络安全相关问题。
+    dataset = common.load_any_dataset(
+        DATASET_SOURCE,
+        split=DATASET_SPLIT,
+        data_files=DATASET_FILES,
+    )
+    if MAX_SAMPLES is not None:
+        if MAX_SAMPLES <= 0:
+            raise ValueError("MAX_SAMPLES 必须大于 0")
+        dataset = dataset.select(range(min(MAX_SAMPLES, len(dataset))))
+    if len(dataset) == 0:
+        raise ValueError("数据集为空")
 
-                            ### Question:
-                            {}
+    print(f"数据集字段：{dataset.column_names}，样本数：{len(dataset)}")
+    dataset = common.build_text_dataset(
+        dataset,
+        tokenizer,
+        system_prompt=SYSTEM_PROMPT,
+        enable_thinking=ENABLE_THINKING,
+        num_proc=DATASET_NUM_PROC,
+    )
+    print("第一条训练样本：")
+    print(dataset[0]["text"][:1200])
 
-                            ### Response:
-                            <think>
-                            {}
-                            </think>
-                            {}"""
-
-    EOS_TOKEN = tokenizer.eos_token # 添加结束符标记
-
-    # 格式化提示函数,用于处理数据集中的示例
-    def formatting_prompts_func(examples):
-        # 从examples中提取问题和回答
-        inputs = examples["instruction"]  # 网络安全问题列表
-        outputs = examples["output"]  # 回答列表
-        texts = []  # 存储格式化后的文本
-        # 遍历每个示例,将问题和回答组合成指定格式
-        for input, output in zip(inputs, outputs):
-            # 为思维链部分提供空字符串，使用train_prompt_style模板格式化文本,并添加结束符
-            # 提供三个参数：问题、思维链(空字符串)、回答
-            text = train_prompt_style.format(input, "", output) + EOS_TOKEN
-            texts.append(text)
-        # 返回格式化后的文本字典
-        return {
-            "text": texts,
-        }
-
-    # 加载数据集并应用格式化
-    dataset = load_dataset("datasets/NetworkSecurity", split="train",
-                           trust_remote_code=True)
-    dataset = dataset.map(formatting_prompts_func, batched=True, )
+    target_modules = LORA_TARGET_MODULES or common.auto_lora_target_modules(
+        model, text_only=TEXT_ONLY
+    )
+    if not target_modules:
+        raise RuntimeError("没有找到 LoRA 目标模块，请手动设置 LORA_TARGET_MODULES")
+    print(f"LoRA 目标模块：{target_modules}")
 
     model = FastLanguageModel.get_peft_model(
-        # 原始模型
         model,
-        # LoRA秩,用于控制低秩矩阵的维度,值越大表示可训练参数越多,模型性能可能更好但训练开销更大
-        # 建议: 8-32之间
-        r=16,
-        # 需要应用LoRA的目标模块列表
-        target_modules=[
-            "q_proj", "k_proj", "v_proj", "o_proj",  # attention相关层
-            "gate_proj", "up_proj", "down_proj",  # FFN相关层
-        ],
-        # LoRA缩放因子,用于控制LoRA更新的幅度。值越大，LoRA的更新影响越大。
-        lora_alpha=16,
-        # LoRA层的dropout率,用于防止过拟合,这里设为0表示不使用dropout。
-        # 如果数据集较小，建议设置0.1左右。
-        lora_dropout=0.1,
-        # 是否对bias参数进行微调,none表示不微调bias
-        # none: 不微调偏置参数；
-        # all: 微调所有参数；
-        # lora_only: 只微调LoRA参数。
-        bias="none",
-        # 是否使用梯度检查点技术节省显存,使用unsloth优化版本
-        # 会略微降低训练速度，但可以显著减少显存使用
-        use_gradient_checkpointing="unsloth",
-        # 随机数种子,用于结果复现
-        random_state=3407,
-        # 是否使用rank-stabilized LoRA,这里不使用
-        # 会略微降低训练速度，但可以显著减少显存使用
-        use_rslora=False,
-        # LoFTQ配置,这里不使用该量化技术，用于进一步压缩模型大小
+        r=LORA_R,
+        target_modules=target_modules,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=LORA_DROPOUT,
+        bias=LORA_BIAS,
+        use_gradient_checkpointing=USE_GRADIENT_CHECKPOINTING,
+        random_state=SEED,
+        max_seq_length=MAX_SEQ_LENGTH,
+        use_rslora=USE_RSLORA,
         loftq_config=None,
+        **get_moe_options(model),
     )
 
-    # 初始化SFT训练器
+    training_args = SFTConfig(
+        output_dir=OUTPUT_DIR,
+        dataset_text_field="text",
+        max_length=MAX_SEQ_LENGTH,
+        dataset_num_proc=DATASET_NUM_PROC,
+        packing=PACKING,
+        per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        warmup_steps=WARMUP_STEPS,
+        max_steps=MAX_STEPS if MAX_STEPS > 0 else -1,
+        num_train_epochs=NUM_TRAIN_EPOCHS,
+        learning_rate=LEARNING_RATE,
+        lr_scheduler_type=LR_SCHEDULER_TYPE,
+        weight_decay=WEIGHT_DECAY,
+        fp16=not capabilities.supports_bf16,
+        bf16=capabilities.supports_bf16,
+        logging_steps=LOGGING_STEPS,
+        save_strategy="steps",
+        save_steps=SAVE_STEPS,
+        optim=common.pick_optimizer(capabilities, OPTIMIZER),
+        seed=SEED,
+        report_to=REPORT_TO,
+    )
     trainer = SFTTrainer(
-        model=model,  # 待训练的模型
-        tokenizer=tokenizer,  # 分词器
-        train_dataset=dataset,  # 训练数据集
-        dataset_text_field="text",  # 数据集字段的名称
-        max_seq_length=max_seq_length,  # 最大序列长度
-        dataset_num_proc=2,  # 数据集处理的并行进程数，提高CPU利用率
-        args=TrainingArguments(
-            per_device_train_batch_size=2,  # 每个GPU的训练批次大小
-            gradient_accumulation_steps=4,  # 梯度累积步数,用于模拟更大的batch size
-            warmup_steps=5,  # 预热步数,逐步增加学习率
-            learning_rate=2e-4,  # 学习率
-            lr_scheduler_type="linear",  # 线性学习率调度器
-            max_steps=60,  # 最大训练步数（一步 = 处理一个batch的数据）
-            # 根据硬件支持选择训练精度
-            fp16=not is_bfloat16_supported(),  # 如果不支持bf16则使用fp16
-            bf16=is_bfloat16_supported(),  # 如果支持则使用bf16
-            logging_steps=1,  # 每1步记录一次日志
-            optim="adamw_8bit",  # 使用8位AdamW优化器节省显存，几乎不影响训练效果
-            weight_decay=0.01,  # 权重衰减系数,用于正则化，防止过拟合
-            seed=3407,  # 随机数种子
-            output_dir="outputs",  # 保存模型检查点和训练日志
-            save_strategy="steps",  # 按步保存中间权重
-            save_steps=20,  # 每20步保存一次中间权重
-            report_to="tensorboard",  # 将信息输出到tensorboard
-        ),
+        model=model,
+        processing_class=tokenizer,
+        train_dataset=dataset,
+        args=training_args,
     )
 
-    # 开始训练，resume_from_checkpoint为True表示从最新的模型开始训练
-    trainer_stats = trainer.train(resume_from_checkpoint = False)
+    if TRAIN_ON_RESPONSES_ONLY:
+        markers = common.detect_response_markers(tokenizer, ENABLE_THINKING)
+        if markers:
+            from unsloth.chat_templates import train_on_responses_only
 
-    # 模型合并后生成的路径
-    new_model_local = "Unsloth-Models"
-    model.save_pretrained(new_model_local)  # 保存训练模型
-    tokenizer.save_pretrained(new_model_local)  # 保存分词器
+            trainer = train_on_responses_only(
+                trainer,
+                instruction_part=markers[0],
+                response_part=markers[1],
+            )
+            print(f"只计算助手回复的损失：{markers[1]!r}")
+        else:
+            print("没有识别出角色标记，将计算完整序列的损失")
 
-    # 保存合并后的16bit模型
-    # model.save_pretrained_merged(new_model_local, tokenizer, save_method="merged_16bit", )
+    trainer.train(resume_from_checkpoint=RESUME_FROM_CHECKPOINT)
 
-    # 保存gguf格式模型，根据需要自行取消注释
-    model.save_pretrained_gguf(new_model_local, tokenizer, quantization_method="q4_k_m")
-    # model.save_pretrained_gguf(new_model_local, tokenizer, quantization_method="q8_0")
-    # model.save_pretrained_gguf(new_model_local, tokenizer, quantization_method="f16")
+    model.save_pretrained(SAVE_LORA_DIR)
+    tokenizer.save_pretrained(SAVE_LORA_DIR)
+    print(f"LoRA 已保存到 {SAVE_LORA_DIR}")
+
+    if SAVE_MERGED_16BIT:
+        model.save_pretrained_merged(MERGED_DIR, tokenizer, save_method="merged_16bit")
+        print(f"合并模型已保存到 {MERGED_DIR}")
+
+    if SAVE_GGUF:
+        result = model.save_pretrained_gguf(
+            GGUF_DIR,
+            tokenizer,
+            quantization_method=GGUF_QUANTS,
+        )
+        if isinstance(result, dict):
+            for path in result.get("gguf_files", []):
+                print(f"GGUF 已保存到 {path}")
+        else:
+            print(f"GGUF 导出完成，请检查 {GGUF_DIR}_gguf")
+
+
+if __name__ == "__main__":
+    main()
