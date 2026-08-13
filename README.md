@@ -393,25 +393,32 @@ GGUF_QUANTS = ["bf16", "q8_0", "q4_k_m"]
 Q4_K_M；应始终从 BF16/F16 中间文件量化，避免重复量化造成额外精度损失。Unsloth 官方接口
 也直接支持 `q4_k_m`：[Saving to GGUF](https://unsloth.ai/docs/basics/inference-and-deployment/saving-to-gguf)。
 
-新版 Unsloth 通常在自己的缓存目录中准备匹配的 llama.cpp 工具。如果要强制使用已有的本地
-llama.cpp，可在启动 Python 前设置路径：
+新版 Unsloth 默认在用户目录的 `.unsloth/llama.cpp` 中准备工具链。为兼容旧项目，如果默认
+目录尚不可用，而启动目录中存在可以运行的 `./llama.cpp`，Unsloth 也可能直接使用这份副本。
+因此，即使没有设置环境变量，项目根目录中的旧版本也可能被选中。
+
+新模型应更新、移走或重命名项目中的旧 `llama.cpp`，让 Unsloth 准备当前工具链。若要使用自己
+维护且已经确认兼容的版本，可在启动 Python 前指定它的绝对路径：
 
 ```powershell
-$env:UNSLOTH_LLAMA_CPP_PATH = (Resolve-Path .\llama.cpp).Path
+$env:UNSLOTH_LLAMA_CPP_PATH = "C:\tools\llama.cpp"
 ```
 
-只有确认本地转换器支持目标模型、`llama-quantize.exe` 可以运行且所需 DLL 齐全时才这样做。
-新模型优先使用最新的 llama.cpp，不要因为项目里存在旧目录就强制复用。
+只有确认转换器支持目标模型、`llama-quantize.exe` 可以运行且所需 DLL 齐全时才这样做。转换
+脚本、`gguf-py`、量化程序和 DLL 应来自同一版本，不要只替换其中一个文件。
 
 ### 手动量化
 
-自动导出失败时，可以先保存合并后的 16bit 模型，再手动执行两步。Windows PowerShell 示例：
+自动导出失败时，可以先保存合并后的 16bit 模型，再使用一套当前且兼容的 llama.cpp 手动执行
+两步。Windows PowerShell 示例：
 
 ```powershell
-python .\llama.cpp\convert_hf_to_gguf.py .\Unsloth-Models-merged `
+$llamaCpp = "C:\tools\llama.cpp"
+
+python "$llamaCpp\convert_hf_to_gguf.py" .\Unsloth-Models-merged `
   --outfile .\Unsloth-Models.BF16.gguf --outtype bf16
 
-.\llama.cpp\llama-quantize.exe `
+& "$llamaCpp\llama-quantize.exe" `
   .\Unsloth-Models.BF16.gguf `
   .\Unsloth-Models.Q4_K_M.gguf `
   Q4_K_M
