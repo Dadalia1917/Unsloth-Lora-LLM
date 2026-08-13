@@ -316,24 +316,23 @@ python inference.py --load_in_4bit --max_seq_length 4096 --max_new_tokens 1024
 
 ## 保存与导出
 
-`train.py` 默认只保存 LoRA：
+`train.py` 默认只保存 LoRA。训练末尾保留了与原版相同的注释式导出配置：
 
 ```python
 SAVE_LORA_DIR = "Unsloth-Models"
-SAVE_MERGED_16BIT = False
-SAVE_GGUF = False
-```
-
-需要合并模型或 GGUF 时再打开对应开关：
-
-```python
-SAVE_MERGED_16BIT = True
-MERGED_DIR = "Unsloth-Models-merged"
-
-SAVE_GGUF = True
 GGUF_DIR = "Unsloth-Models-GGUF"
-GGUF_QUANTS = ["q4_k_m"]
+
+# model.save_pretrained_merged("Unsloth-Models-merged", tokenizer, save_method="merged_16bit")
+
+gguf_quants = [
+    # "q4_k_m",
+    # "q8_0",
+    # "f16",
+]
 ```
+
+默认三项都被注释，不会导出 GGUF。需要 Q4_K_M 时只删除 `"q4_k_m"` 前面的 `#`；需要多个
+格式就同时取消多项注释。代码会把列表一次传给 Unsloth，不会为每种格式重复合并 LoRA。
 
 CLI 示例：
 
@@ -386,10 +385,10 @@ llama.cpp 官方也把流程分成“先转换高精度 GGUF，再用 `llama-qua
 多个量化格式应一次传入列表。这样只合并和转换一次，再从同一个高精度 GGUF生成各量化版本：
 
 ```python
-GGUF_QUANTS = ["bf16", "q8_0", "q4_k_m"]
+gguf_quants = ["bf16", "q8_0", "q4_k_m"]
 ```
 
-如果只需要部署文件，使用 `GGUF_QUANTS = ["q4_k_m"]` 即可。不要先把 Q8_0 再量化成
+如果只需要部署文件，只取消 `"q4_k_m"` 的注释即可。不要先把 Q8_0 再量化成
 Q4_K_M；应始终从 BF16/F16 中间文件量化，避免重复量化造成额外精度损失。Unsloth 官方接口
 也直接支持 `q4_k_m`：[Saving to GGUF](https://unsloth.ai/docs/basics/inference-and-deployment/saving-to-gguf)。
 

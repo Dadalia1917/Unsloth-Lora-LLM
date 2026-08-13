@@ -66,11 +66,7 @@ SEED = 3407
 
 # 保存
 SAVE_LORA_DIR = "Unsloth-Models"
-SAVE_MERGED_16BIT = False
-MERGED_DIR = "Unsloth-Models-merged"
-SAVE_GGUF = False
 GGUF_DIR = "Unsloth-Models-GGUF"
-GGUF_QUANTS = ["q4_k_m"]
 
 
 def check_config() -> None:
@@ -230,15 +226,20 @@ def main() -> None:
     tokenizer.save_pretrained(SAVE_LORA_DIR)
     print(f"LoRA 已保存到 {SAVE_LORA_DIR}")
 
-    if SAVE_MERGED_16BIT:
-        model.save_pretrained_merged(MERGED_DIR, tokenizer, save_method="merged_16bit")
-        print(f"合并模型已保存到 {MERGED_DIR}")
+    # 保存合并后的 16bit 模型时取消下一行注释
+    # model.save_pretrained_merged("Unsloth-Models-merged", tokenizer, save_method="merged_16bit")
 
-    if SAVE_GGUF:
+    # 取消对应注释即可导出一种或多种 GGUF
+    gguf_quants = [
+        # "q4_k_m",
+        # "q8_0",
+        # "f16",
+    ]
+    if gguf_quants:
         result = model.save_pretrained_gguf(
             GGUF_DIR,
             tokenizer,
-            quantization_method=GGUF_QUANTS,
+            quantization_method=gguf_quants,
         )
         if isinstance(result, dict):
             for path in result.get("gguf_files", []):
