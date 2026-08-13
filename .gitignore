@@ -1,27 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
 # 虚拟环境
 env/
 .env
 .venv/
 venv/
 
-# 数据集
+# 数据、模型和训练输出
 datasets/
-
-# 模型文件
 models/
-Unsloth-Models/
-
-# 输出文件
 outputs/
+Unsloth-Models/
+Unsloth-Models-*/
+unsloth_compiled_cache/
+wandb/
 
-# Python 缓存文件
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
+# 模型权重
+*.bin
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.ckpt
 
-# 分发/打包
-.Python
+# IDE 和系统文件
+.idea/
+.vscode/
+.cunzhi-memory/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# 构建和打包
 build/
 develop-eggs/
 dist/
@@ -38,49 +54,19 @@ wheels/
 .installed.cfg
 *.egg
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# 系统文件
-.DS_Store
-Thumbs.db
-
-# 日志文件
+# 日志、缓存和临时文件
 *.log
-
-# 临时文件
 *.tmp
 *.temp
-
-# 编译文件
-*.pyc
-*.pyo
 *.compiled
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# pytest
+.ipynb_checkpoints/
 .pytest_cache/
-
-# Coverage
 .coverage
 htmlcov/
+events.out.tfevents.*
 
-# 环境变量
+# 本地环境变量文件
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
-
-# 大型二进制文件
-*.bin
-*.safetensors
-*.gguf
-*.pt
-*.pth
-*.ckpt
